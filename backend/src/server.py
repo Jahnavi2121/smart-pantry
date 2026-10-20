@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from src.api.auth import router as auth_router
 from src.api.products import router as products_router
-
+from src.api.users import router as users_router
+from src.api.households import router as households_router
+from src.api.inventory import router as inventory_router
 
 app = FastAPI(
     title="Smart Pantry API",
@@ -22,7 +24,10 @@ app.add_middleware(
 )
 
 app.include_router(products_router)
-
+app.include_router(users_router)
+app.include_router(households_router)
+app.include_router(inventory_router)
+app.include_router(auth_router)
 
 @app.get("/health")
 def health_check():
