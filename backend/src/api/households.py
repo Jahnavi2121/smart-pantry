@@ -1,6 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+import psycopg2
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from src.api.auth import get_current_user
 from src.db.db import get_connection
 
 
@@ -12,55 +15,40 @@ router = APIRouter(
 
 class HouseholdCreate(BaseModel):
     name: str
-    created_by: int
 
 
 class HouseholdMemberAdd(BaseModel):
-    owner_user_id: int
     user_id: int
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_household(household: HouseholdCreate):
+def create_household(
+    household: HouseholdCreate,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection:
             with connection.cursor() as cursor:
 
-                # Verify creator exists
                 cursor.execute(
                     """
-                    SELECT id
-                    FROM users
-                    WHERE id = %s;
-                    """,
-                    (household.created_by,)
-                )
-
-                if cursor.fetchone() is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="User not found."
+                    INSERT INTO households (
+                        name,
+                        created_by
                     )
-
-                # Create household
-                cursor.execute(
-                    """
-                    INSERT INTO households (name, created_by)
                     VALUES (%s, %s)
                     RETURNING id, name, created_by, created_at;
                     """,
                     (
                         household.name,
-                        household.created_by
+                        current_user["id"],
                     ),
                 )
 
                 row = cursor.fetchone()
-                household_id = row[0]
 
-                # Automatically add creator as owner
                 cursor.execute(
                     """
                     INSERT INTO household_members (
@@ -71,9 +59,9 @@ def create_household(household: HouseholdCreate):
                     VALUES (%s, %s, %s);
                     """,
                     (
-                        household_id,
-                        household.created_by,
-                        "owner"
+                        row[0],
+                        current_user["id"],
+                        "owner",
                     ),
                 )
 
@@ -89,17 +77,29 @@ def create_household(household: HouseholdCreate):
 
 
 @router.get("")
-def get_households():
+def get_households(
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+
             cursor.execute(
                 """
-                SELECT id, name, created_by, created_at
-                FROM households
-                ORDER BY id;
-                """
+                SELECT
+                    h.id,
+                    h.name,
+                    h.created_by,
+                    h.created_at,
+                    hm.role
+                FROM households h
+                JOIN household_members hm
+                    ON h.id = hm.household_id
+                WHERE hm.user_id = %s
+                ORDER BY h.id;
+                """,
+                (current_user["id"],),
             )
 
             rows = cursor.fetchall()
@@ -110,6 +110,7 @@ def get_households():
                 "name": row[1],
                 "created_by": row[2],
                 "created_at": row[3],
+                "role": row[4],
             }
             for row in rows
         ]
@@ -118,13 +119,11 @@ def get_households():
         connection.close()
 
 
-@router.post(
-    "/{household_id}/members",
-    status_code=status.HTTP_201_CREATED
-)
+@router.post("/{household_id}/members")
 def add_household_member(
     household_id: int,
-    member: HouseholdMemberAdd
+    member: HouseholdMemberAdd,
+    current_user: dict = Depends(get_current_user)
 ):
     connection = get_connection()
 
@@ -132,7 +131,7 @@ def add_household_member(
         with connection:
             with connection.cursor() as cursor:
 
-                # Verify requesting user is the household owner
+                # Current user must be the household owner
                 cursor.execute(
                     """
                     SELECT 1
@@ -143,7 +142,7 @@ def add_household_member(
                     """,
                     (
                         household_id,
-                        member.owner_user_id,
+                        current_user["id"],
                     ),
                 )
 
@@ -153,58 +152,50 @@ def add_household_member(
                         detail="Only the household owner can add members."
                     )
 
-                # Verify new user exists
+                # Make sure the new user exists
                 cursor.execute(
                     """
-                    SELECT id, name, email
+                    SELECT id
                     FROM users
                     WHERE id = %s;
                     """,
                     (member.user_id,),
                 )
 
-                user = cursor.fetchone()
-
-                if user is None:
+                if cursor.fetchone() is None:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="User not found."
                     )
 
-                # Add member
-                cursor.execute(
-                    """
-                    INSERT INTO household_members (
-                        household_id,
-                        user_id,
-                        role
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO household_members (
+                            household_id,
+                            user_id,
+                            role
+                        )
+                        VALUES (%s, %s, %s);
+                        """,
+                        (
+                            household_id,
+                            member.user_id,
+                            "member",
+                        ),
                     )
-                    VALUES (%s, %s, 'member')
-                    ON CONFLICT (household_id, user_id)
-                    DO NOTHING
-                    RETURNING household_id, user_id, role, joined_at;
-                    """,
-                    (
-                        household_id,
-                        member.user_id,
-                    ),
-                )
 
-                membership = cursor.fetchone()
-
-                if membership is None:
+                except psycopg2.errors.UniqueViolation as error:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="User is already a member of this household."
-                    )
+                    ) from error
 
         return {
-            "household_id": membership[0],
-            "user_id": membership[1],
-            "user_name": user[1],
-            "email": user[2],
-            "role": membership[2],
-            "joined_at": membership[3],
+            "message": "Household member added successfully.",
+            "household_id": household_id,
+            "user_id": member.user_id,
+            "role": "member",
         }
 
     finally:
@@ -212,15 +203,39 @@ def add_household_member(
 
 
 @router.get("/{household_id}/members")
-def get_household_members(household_id: int):
+def get_household_members(
+    household_id: int,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+
+            # User requesting the list must belong to the household
+            cursor.execute(
+                """
+                SELECT 1
+                FROM household_members
+                WHERE household_id = %s
+                  AND user_id = %s;
+                """,
+                (
+                    household_id,
+                    current_user["id"],
+                ),
+            )
+
+            if cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not a member of this household."
+                )
+
             cursor.execute(
                 """
                 SELECT
-                    hm.user_id,
+                    u.id,
                     u.name,
                     u.email,
                     hm.role,
@@ -229,7 +244,7 @@ def get_household_members(household_id: int):
                 JOIN users u
                     ON hm.user_id = u.id
                 WHERE hm.household_id = %s
-                ORDER BY hm.joined_at;
+                ORDER BY hm.joined_at, u.id;
                 """,
                 (household_id,),
             )
@@ -238,7 +253,7 @@ def get_household_members(household_id: int):
 
         return [
             {
-                "user_id": row[0],
+                "id": row[0],
                 "name": row[1],
                 "email": row[2],
                 "role": row[3],

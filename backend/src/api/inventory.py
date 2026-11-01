@@ -1,9 +1,10 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from src.api.auth import get_current_user
 from src.db.db import get_connection
 
 
@@ -16,46 +17,57 @@ router = APIRouter(
 class InventoryCreate(BaseModel):
     household_id: int
     product_id: int
-    user_id: int
     quantity: int = Field(default=1, ge=0)
     expiration_date: Optional[date] = None
     low_stock_threshold: int = Field(default=1, ge=0)
 
 
 class InventoryQuantityChange(BaseModel):
-    user_id: int
     change: int
 
 
+def verify_household_membership(
+    cursor,
+    household_id: int,
+    user_id: int
+):
+    cursor.execute(
+        """
+        SELECT 1
+        FROM household_members
+        WHERE household_id = %s
+          AND user_id = %s;
+        """,
+        (
+            household_id,
+            user_id,
+        ),
+    )
+
+    if cursor.fetchone() is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this household."
+        )
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_inventory_item(item: InventoryCreate):
+def create_inventory_item(
+    item: InventoryCreate,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection:
             with connection.cursor() as cursor:
 
-                # Verify that the user belongs to the household
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM household_members
-                    WHERE household_id = %s
-                      AND user_id = %s;
-                    """,
-                    (
-                        item.household_id,
-                        item.user_id,
-                    ),
+                verify_household_membership(
+                    cursor,
+                    item.household_id,
+                    current_user["id"]
                 )
 
-                if cursor.fetchone() is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="User is not a member of this household."
-                    )
-
-                # Verify that the product exists
                 cursor.execute(
                     """
                     SELECT id
@@ -71,7 +83,6 @@ def create_inventory_item(item: InventoryCreate):
                         detail="Product not found."
                     )
 
-                # Add item to inventory
                 cursor.execute(
                     """
                     INSERT INTO inventory_items (
@@ -104,7 +115,6 @@ def create_inventory_item(item: InventoryCreate):
 
                 row = cursor.fetchone()
 
-                # Record creation in inventory history
                 cursor.execute(
                     """
                     INSERT INTO inventory_history (
@@ -118,7 +128,7 @@ def create_inventory_item(item: InventoryCreate):
                     """,
                     (
                         row[0],
-                        item.user_id,
+                        current_user["id"],
                         "ADD",
                         0,
                         item.quantity,
@@ -144,7 +154,8 @@ def create_inventory_item(item: InventoryCreate):
 @router.patch("/{inventory_item_id}/quantity")
 def update_inventory_quantity(
     inventory_item_id: int,
-    update: InventoryQuantityChange
+    update: InventoryQuantityChange,
+    current_user: dict = Depends(get_current_user)
 ):
     connection = get_connection()
 
@@ -152,7 +163,6 @@ def update_inventory_quantity(
         with connection:
             with connection.cursor() as cursor:
 
-                # Lock the row while the quantity is being updated
                 cursor.execute(
                     """
                     SELECT household_id, quantity
@@ -175,25 +185,11 @@ def update_inventory_quantity(
                 household_id = row[0]
                 old_quantity = row[1]
 
-                # Verify that the user belongs to the household
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM household_members
-                    WHERE household_id = %s
-                      AND user_id = %s;
-                    """,
-                    (
-                        household_id,
-                        update.user_id,
-                    ),
+                verify_household_membership(
+                    cursor,
+                    household_id,
+                    current_user["id"]
                 )
-
-                if cursor.fetchone() is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="User is not a member of this household."
-                    )
 
                 if update.change == 0:
                     raise HTTPException(
@@ -209,7 +205,6 @@ def update_inventory_quantity(
                         detail="Quantity cannot be less than zero."
                     )
 
-                # Update the inventory quantity
                 cursor.execute(
                     """
                     UPDATE inventory_items
@@ -226,9 +221,12 @@ def update_inventory_quantity(
 
                 updated_row = cursor.fetchone()
 
-                action = "CONSUME" if update.change < 0 else "RESTOCK"
+                action = (
+                    "CONSUME"
+                    if update.change < 0
+                    else "RESTOCK"
+                )
 
-                # Record the quantity change
                 cursor.execute(
                     """
                     INSERT INTO inventory_history (
@@ -242,7 +240,7 @@ def update_inventory_quantity(
                     """,
                     (
                         inventory_item_id,
-                        update.user_id,
+                        current_user["id"],
                         action,
                         old_quantity,
                         new_quantity,
@@ -260,12 +258,40 @@ def update_inventory_quantity(
     finally:
         connection.close()
 
+
 @router.get("/{inventory_item_id}/history")
-def get_inventory_history(inventory_item_id: int):
+def get_inventory_history(
+    inventory_item_id: int,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT household_id
+                FROM inventory_items
+                WHERE id = %s;
+                """,
+                (inventory_item_id,),
+            )
+
+            inventory_item = cursor.fetchone()
+
+            if inventory_item is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Inventory item not found."
+                )
+
+            verify_household_membership(
+                cursor,
+                inventory_item[0],
+                current_user["id"]
+            )
+
             cursor.execute(
                 """
                 SELECT
@@ -305,12 +331,23 @@ def get_inventory_history(inventory_item_id: int):
     finally:
         connection.close()
 
+
 @router.get("/{household_id}/low-stock")
-def get_low_stock_items(household_id: int):
+def get_low_stock_items(
+    household_id: int,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+
+            verify_household_membership(
+                cursor,
+                household_id,
+                current_user["id"]
+            )
+
             cursor.execute(
                 """
                 SELECT
@@ -352,8 +389,13 @@ def get_low_stock_items(household_id: int):
     finally:
         connection.close()
 
+
 @router.get("/{household_id}/expiring-soon")
-def get_expiring_soon_items(household_id: int, days: int = 7):
+def get_expiring_soon_items(
+    household_id: int,
+    days: int = 7,
+    current_user: dict = Depends(get_current_user)
+):
     if days < 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -364,6 +406,13 @@ def get_expiring_soon_items(household_id: int, days: int = 7):
 
     try:
         with connection.cursor() as cursor:
+
+            verify_household_membership(
+                cursor,
+                household_id,
+                current_user["id"]
+            )
+
             cursor.execute(
                 """
                 SELECT
@@ -407,10 +456,12 @@ def get_expiring_soon_items(household_id: int, days: int = 7):
 
     finally:
         connection.close()
+
+
 @router.delete("/{inventory_item_id}")
 def remove_inventory_item(
     inventory_item_id: int,
-    user_id: int
+    current_user: dict = Depends(get_current_user)
 ):
     connection = get_connection()
 
@@ -440,27 +491,12 @@ def remove_inventory_item(
                 household_id = item[0]
                 old_quantity = item[1]
 
-                # Verify user belongs to household
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM household_members
-                    WHERE household_id = %s
-                      AND user_id = %s;
-                    """,
-                    (
-                        household_id,
-                        user_id,
-                    ),
+                verify_household_membership(
+                    cursor,
+                    household_id,
+                    current_user["id"]
                 )
 
-                if cursor.fetchone() is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="User is not a member of this household."
-                    )
-
-                # Soft-delete the inventory item
                 cursor.execute(
                     """
                     UPDATE inventory_items
@@ -472,7 +508,6 @@ def remove_inventory_item(
                     (inventory_item_id,),
                 )
 
-                # Record removal in history
                 cursor.execute(
                     """
                     INSERT INTO inventory_history (
@@ -486,7 +521,7 @@ def remove_inventory_item(
                     """,
                     (
                         inventory_item_id,
-                        user_id,
+                        current_user["id"],
                         "REMOVE",
                         old_quantity,
                         0,
@@ -501,12 +536,23 @@ def remove_inventory_item(
     finally:
         connection.close()
 
+
 @router.get("/{household_id}")
-def get_inventory(household_id: int):
+def get_inventory(
+    household_id: int,
+    current_user: dict = Depends(get_current_user)
+):
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+
+            verify_household_membership(
+                cursor,
+                household_id,
+                current_user["id"]
+            )
+
             cursor.execute(
                 """
                 SELECT
