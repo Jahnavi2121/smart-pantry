@@ -41,8 +41,12 @@ export default function DashboardPage() {
 
   const [user, setUser] = useState<User | null>(null);
   const [household, setHousehold] = useState<Household | null>(null);
+
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+
+  const [lowStockItems, setLowStockItems] = useState<InventoryItem[]>([]);
+  const [expiringItems, setExpiringItems] = useState<InventoryItem[]>([]);
 
   const [selectedProductId, setSelectedProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
@@ -51,6 +55,7 @@ export default function DashboardPage() {
 
   const [loading, setLoading] = useState(true);
   const [addingItem, setAddingItem] = useState(false);
+
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -73,12 +78,14 @@ export default function DashboardPage() {
         Authorization: `Bearer ${token}`,
       };
 
+      // Load logged-in user
       const userResponse = await fetch(`${API_URL}/auth/me`, {
         headers: authHeaders,
       });
 
       if (!userResponse.ok) {
         localStorage.removeItem("access_token");
+        localStorage.removeItem("user_name");
         router.push("/");
         return;
       }
@@ -86,6 +93,7 @@ export default function DashboardPage() {
       const userData = await userResponse.json();
       setUser(userData);
 
+      // Load user's households
       const householdResponse = await fetch(`${API_URL}/households`, {
         headers: authHeaders,
       });
@@ -102,8 +110,10 @@ export default function DashboardPage() {
       }
 
       const firstHousehold = households[0];
+
       setHousehold(firstHousehold);
 
+      // Load household inventory
       const inventoryResponse = await fetch(
         `${API_URL}/inventory/${firstHousehold.id}`,
         {
@@ -118,6 +128,37 @@ export default function DashboardPage() {
       const inventoryData = await inventoryResponse.json();
       setInventory(inventoryData);
 
+      // Load low-stock items
+      const lowStockResponse = await fetch(
+        `${API_URL}/inventory/${firstHousehold.id}/low-stock`,
+        {
+          headers: authHeaders,
+        }
+      );
+
+      if (!lowStockResponse.ok) {
+        throw new Error("Could not load low-stock items.");
+      }
+
+      const lowStockData = await lowStockResponse.json();
+      setLowStockItems(lowStockData);
+
+      // Load items expiring within 14 days
+      const expiringResponse = await fetch(
+        `${API_URL}/inventory/${firstHousehold.id}/expiring-soon?days=14`,
+        {
+          headers: authHeaders,
+        }
+      );
+
+      if (!expiringResponse.ok) {
+        throw new Error("Could not load expiring items.");
+      }
+
+      const expiringData = await expiringResponse.json();
+      setExpiringItems(expiringData);
+
+      // Load available products
       const productsResponse = await fetch(`${API_URL}/products`);
 
       if (!productsResponse.ok) {
@@ -265,14 +306,17 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
-        <p>Loading pantry...</p>
+      <main className="min-h-screen flex items-center justify-center bg-gray-100">
+        <p className="text-gray-700">
+          Loading pantry...
+        </p>
       </main>
     );
   }
 
   return (
     <main className="min-h-screen bg-gray-100">
+      {/* Header */}
       <header className="bg-green-700 text-white px-8 py-5 flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold">
@@ -286,25 +330,28 @@ export default function DashboardPage() {
 
         <button
           onClick={handleLogout}
-          className="bg-white text-green-700 px-4 py-2 rounded-lg font-medium"
+          className="bg-white text-green-700 px-4 py-2 rounded-lg font-medium hover:bg-gray-100"
         >
           Logout
         </button>
       </header>
 
       <div className="max-w-6xl mx-auto p-8">
+        {/* Error message */}
         {error && (
           <div className="bg-red-100 text-red-700 p-4 rounded-lg mb-6">
             {error}
           </div>
         )}
 
+        {/* Success message */}
         {message && (
           <div className="bg-green-100 text-green-700 p-4 rounded-lg mb-6">
             {message}
           </div>
         )}
 
+        {/* Household information */}
         {household && (
           <>
             <h2 className="text-2xl font-semibold text-gray-900">
@@ -317,6 +364,91 @@ export default function DashboardPage() {
           </>
         )}
 
+        {/* Low Stock and Expiring Soon */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          {/* Low Stock */}
+          <div className="bg-white rounded-xl shadow p-6">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">
+              Low Stock
+            </h3>
+
+            {lowStockItems.length === 0 ? (
+              <p className="text-gray-500">
+                No low-stock items.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {lowStockItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="border border-gray-200 rounded-lg p-3"
+                  >
+                    <p className="font-medium text-gray-900">
+                      {item.product_name}
+                    </p>
+
+                    {item.brand && (
+                      <p className="text-sm text-gray-500">
+                        {item.brand}
+                      </p>
+                    )}
+
+                    <p className="text-sm text-gray-700 mt-1">
+                      Quantity: {item.quantity}
+                    </p>
+
+                    <p className="text-sm text-gray-500">
+                      Low stock threshold:{" "}
+                      {item.low_stock_threshold}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Expiring Soon */}
+          <div className="bg-white rounded-xl shadow p-6">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">
+              Expiring Soon
+            </h3>
+
+            {expiringItems.length === 0 ? (
+              <p className="text-gray-500">
+                No items expiring in the next 14 days.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {expiringItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="border border-gray-200 rounded-lg p-3"
+                  >
+                    <p className="font-medium text-gray-900">
+                      {item.product_name}
+                    </p>
+
+                    {item.brand && (
+                      <p className="text-sm text-gray-500">
+                        {item.brand}
+                      </p>
+                    )}
+
+                    <p className="text-sm text-gray-700 mt-1">
+                      Quantity: {item.quantity}
+                    </p>
+
+                    <p className="text-sm text-gray-500">
+                      Expires: {item.expiration_date}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Add Item */}
         <div className="bg-white rounded-xl shadow p-6 mb-8">
           <h3 className="text-xl font-semibold text-gray-900 mb-5">
             Add Item
@@ -326,6 +458,7 @@ export default function DashboardPage() {
             onSubmit={handleAddItem}
             className="grid grid-cols-1 md:grid-cols-2 gap-4"
           >
+            {/* Product */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Product
@@ -359,6 +492,7 @@ export default function DashboardPage() {
               </select>
             </div>
 
+            {/* Quantity */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Quantity
@@ -376,6 +510,7 @@ export default function DashboardPage() {
               />
             </div>
 
+            {/* Expiration Date */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Expiration Date
@@ -391,6 +526,7 @@ export default function DashboardPage() {
               />
             </div>
 
+            {/* Low Stock Threshold */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Low Stock Threshold
@@ -410,6 +546,7 @@ export default function DashboardPage() {
               />
             </div>
 
+            {/* Submit */}
             <div className="md:col-span-2">
               <button
                 type="submit"
@@ -427,6 +564,7 @@ export default function DashboardPage() {
           </form>
         </div>
 
+        {/* My Pantry */}
         <div className="bg-white rounded-xl shadow p-6">
           <h3 className="text-xl font-semibold text-gray-900 mb-4">
             My Pantry
@@ -457,7 +595,7 @@ export default function DashboardPage() {
                     Quantity: {item.quantity}
                   </p>
 
-                  <div className="flex gap-3 mt-4">
+                  <div className="flex flex-wrap gap-3 mt-4">
                     <button
                       onClick={() =>
                         changeQuantity(item.id, -1)
