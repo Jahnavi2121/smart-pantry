@@ -20,7 +20,7 @@ security = HTTPBearer()
 
 JWT_SECRET = os.getenv(
     "SMART_PANTRY_JWT_SECRET",
-    "smart-pantry-development-secret"
+    "smart-pantry-development-secret-key-for-local-testing-2026"
 )
 
 JWT_ALGORITHM = "HS256"
