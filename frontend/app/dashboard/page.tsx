@@ -1,7 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
+
+import {
+  BrowserCodeReader,
+  BrowserMultiFormatReader,
+} from "@zxing/browser";
 
 const API_URL = "http://127.0.0.1:8000";
 
@@ -36,26 +46,82 @@ type InventoryItem = {
   low_stock_threshold: number;
 };
 
+type HistoryEntry = {
+  id: number;
+  inventory_item_id: number;
+  user_id: number;
+  user_name: string;
+  action: string;
+  old_quantity: number | null;
+  new_quantity: number | null;
+  created_at: string;
+};
+
 export default function DashboardPage() {
   const router = useRouter();
 
-  const [user, setUser] = useState<User | null>(null);
-  const [household, setHousehold] = useState<Household | null>(null);
-  const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scanCancelledRef = useRef(false);
 
-  const [selectedProductId, setSelectedProductId] = useState("");
+  const [user, setUser] = useState<User | null>(null);
+  const [household, setHousehold] =
+    useState<Household | null>(null);
+
+  const [inventory, setInventory] =
+    useState<InventoryItem[]>([]);
+
+  const [products, setProducts] =
+    useState<Product[]>([]);
+
+  const [lowStockItems, setLowStockItems] =
+    useState<InventoryItem[]>([]);
+
+  const [expiringItems, setExpiringItems] =
+    useState<InventoryItem[]>([]);
+
+  const [historyByItem, setHistoryByItem] =
+    useState<Record<number, HistoryEntry[]>>({});
+
+  const [openHistoryItemId, setOpenHistoryItemId] =
+    useState<number | null>(null);
+
+  const [barcodeInput, setBarcodeInput] = useState("");
+  const [barcodeResult, setBarcodeResult] = useState("");
+
+  const [lookingUpBarcode, setLookingUpBarcode] =
+    useState(false);
+
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanning, setScanning] = useState(false);
+
+  const [selectedProductId, setSelectedProductId] =
+    useState("");
+
   const [quantity, setQuantity] = useState(1);
-  const [expirationDate, setExpirationDate] = useState("");
-  const [lowStockThreshold, setLowStockThreshold] = useState(1);
+  const [expirationDate, setExpirationDate] =
+    useState("");
+
+  const [lowStockThreshold, setLowStockThreshold] =
+    useState(1);
 
   const [loading, setLoading] = useState(true);
   const [addingItem, setAddingItem] = useState(false);
+
+  const [removingItemId, setRemovingItemId] =
+    useState<number | null>(null);
+
+  const [loadingHistoryId, setLoadingHistoryId] =
+    useState<number | null>(null);
+
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
   useEffect(() => {
     loadDashboard();
+
+    return () => {
+      BrowserCodeReader.releaseAllStreams();
+    };
   }, []);
 
   async function loadDashboard() {
@@ -73,12 +139,16 @@ export default function DashboardPage() {
         Authorization: `Bearer ${token}`,
       };
 
-      const userResponse = await fetch(`${API_URL}/auth/me`, {
-        headers: authHeaders,
-      });
+      const userResponse = await fetch(
+        `${API_URL}/auth/me`,
+        {
+          headers: authHeaders,
+        }
+      );
 
       if (!userResponse.ok) {
         localStorage.removeItem("access_token");
+        localStorage.removeItem("user_name");
         router.push("/");
         return;
       }
@@ -86,15 +156,21 @@ export default function DashboardPage() {
       const userData = await userResponse.json();
       setUser(userData);
 
-      const householdResponse = await fetch(`${API_URL}/households`, {
-        headers: authHeaders,
-      });
+      const householdResponse = await fetch(
+        `${API_URL}/households`,
+        {
+          headers: authHeaders,
+        }
+      );
 
       if (!householdResponse.ok) {
-        throw new Error("Could not load household.");
+        throw new Error(
+          "Could not load household."
+        );
       }
 
-      const households = await householdResponse.json();
+      const households =
+        await householdResponse.json();
 
       if (households.length === 0) {
         setError("No household found.");
@@ -102,6 +178,7 @@ export default function DashboardPage() {
       }
 
       const firstHousehold = households[0];
+
       setHousehold(firstHousehold);
 
       const inventoryResponse = await fetch(
@@ -112,23 +189,74 @@ export default function DashboardPage() {
       );
 
       if (!inventoryResponse.ok) {
-        throw new Error("Could not load inventory.");
+        throw new Error(
+          "Could not load inventory."
+        );
       }
 
-      const inventoryData = await inventoryResponse.json();
+      const inventoryData =
+        await inventoryResponse.json();
+
       setInventory(inventoryData);
 
-      const productsResponse = await fetch(`${API_URL}/products`);
+      const lowStockResponse = await fetch(
+        `${API_URL}/inventory/${firstHousehold.id}/low-stock`,
+        {
+          headers: authHeaders,
+        }
+      );
 
-      if (!productsResponse.ok) {
-        throw new Error("Could not load products.");
+      if (!lowStockResponse.ok) {
+        throw new Error(
+          "Could not load low-stock items."
+        );
       }
 
-      const productData = await productsResponse.json();
+      const lowStockData =
+        await lowStockResponse.json();
+
+      setLowStockItems(lowStockData);
+
+      const expiringResponse = await fetch(
+        `${API_URL}/inventory/${firstHousehold.id}/expiring-soon?days=14`,
+        {
+          headers: authHeaders,
+        }
+      );
+
+      if (!expiringResponse.ok) {
+        throw new Error(
+          "Could not load expiring items."
+        );
+      }
+
+      const expiringData =
+        await expiringResponse.json();
+
+      setExpiringItems(expiringData);
+
+      const productsResponse = await fetch(
+        `${API_URL}/products`
+      );
+
+      if (!productsResponse.ok) {
+        throw new Error(
+          "Could not load products."
+        );
+      }
+
+      const productData =
+        await productsResponse.json();
+
       setProducts(productData);
 
-      if (productData.length > 0 && !selectedProductId) {
-        setSelectedProductId(String(productData[0].id));
+      if (
+        productData.length > 0 &&
+        !selectedProductId
+      ) {
+        setSelectedProductId(
+          String(productData[0].id)
+        );
       }
     } catch (error) {
       if (error instanceof Error) {
@@ -141,11 +269,218 @@ export default function DashboardPage() {
     }
   }
 
+  async function lookupBarcode(
+    barcodeOverride?: string
+  ) {
+    const barcode = (
+      barcodeOverride ?? barcodeInput
+    ).trim();
+
+    if (!barcode) {
+      setError("Please enter a barcode.");
+      return;
+    }
+
+    if (!/^\d+$/.test(barcode)) {
+      setError(
+        "Barcode must contain only numbers."
+      );
+      return;
+    }
+
+    const token =
+      localStorage.getItem("access_token");
+
+    if (!token) {
+      router.push("/");
+      return;
+    }
+
+    try {
+      setLookingUpBarcode(true);
+      setError("");
+      setMessage("");
+      setBarcodeResult("");
+
+      const response = await fetch(
+        `${API_URL}/products/barcode/${encodeURIComponent(
+          barcode
+        )}/import`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+
+        throw new Error(
+          data.detail ||
+            "Could not find product for this barcode."
+        );
+      }
+
+      const product: Product =
+        await response.json();
+
+      setProducts((currentProducts) => {
+        const alreadyExists =
+          currentProducts.some(
+            (existingProduct) =>
+              existingProduct.id === product.id
+          );
+
+        if (alreadyExists) {
+          return currentProducts;
+        }
+
+        return [...currentProducts, product];
+      });
+
+      setSelectedProductId(
+        String(product.id)
+      );
+
+      setBarcodeInput(barcode);
+
+      setBarcodeResult(
+        `Found: ${product.name}${
+          product.brand
+            ? ` - ${product.brand}`
+            : ""
+        }`
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError(
+          "Could not look up barcode."
+        );
+      }
+    } finally {
+      setLookingUpBarcode(false);
+    }
+  }
+
+  async function scanBarcode() {
+    if (
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      setError(
+        "Camera access is not supported by this browser."
+      );
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      setError(
+        "Camera scanning requires localhost or HTTPS. Open the app using http://localhost:3000."
+      );
+      return;
+    }
+
+    try {
+      setError("");
+      setMessage("");
+      setBarcodeResult("");
+
+      scanCancelledRef.current = false;
+
+      setScannerOpen(true);
+      setScanning(true);
+
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+
+      const videoElement = videoRef.current;
+
+      if (!videoElement) {
+        throw new Error(
+          "Camera preview could not be started."
+        );
+      }
+
+      const codeReader =
+        new BrowserMultiFormatReader();
+
+      const result =
+        await codeReader.decodeOnceFromVideoDevice(
+          undefined,
+          videoElement
+        );
+
+      if (scanCancelledRef.current) {
+        return;
+      }
+
+      const scannedBarcode =
+        result.getText().trim();
+
+      if (!/^\d+$/.test(scannedBarcode)) {
+        throw new Error(
+          "The scanned code is not a numeric product barcode."
+        );
+      }
+
+      BrowserCodeReader.releaseAllStreams();
+
+      setScannerOpen(false);
+      setScanning(false);
+
+      setBarcodeInput(scannedBarcode);
+
+      await lookupBarcode(scannedBarcode);
+    } catch (error) {
+      BrowserCodeReader.releaseAllStreams();
+
+      setScannerOpen(false);
+      setScanning(false);
+
+      if (scanCancelledRef.current) {
+        return;
+      }
+
+      if (
+        error instanceof DOMException &&
+        error.name === "NotAllowedError"
+      ) {
+        setError(
+          "Camera permission was denied. Allow camera access and try again."
+        );
+      } else if (error instanceof Error) {
+        setError(
+          error.message ||
+            "Could not scan barcode."
+        );
+      } else {
+        setError(
+          "Could not scan barcode."
+        );
+      }
+    }
+  }
+
+  function stopScanner() {
+    scanCancelledRef.current = true;
+
+    BrowserCodeReader.releaseAllStreams();
+
+    setScanning(false);
+    setScannerOpen(false);
+  }
+
   async function changeQuantity(
     inventoryItemId: number,
     change: number
   ) {
-    const token = localStorage.getItem("access_token");
+    const token =
+      localStorage.getItem("access_token");
 
     if (!token) {
       router.push("/");
@@ -161,7 +496,8 @@ export default function DashboardPage() {
         {
           method: "PATCH",
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
             Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
@@ -174,16 +510,35 @@ export default function DashboardPage() {
         const data = await response.json();
 
         throw new Error(
-          data.detail || "Could not update quantity."
+          data.detail ||
+            "Could not update quantity."
         );
       }
 
+      setMessage(
+        change < 0
+          ? "Item consumed successfully."
+          : "Item restocked successfully."
+      );
+
       await loadDashboard();
+
+      if (
+        openHistoryItemId ===
+        inventoryItemId
+      ) {
+        await loadHistory(
+          inventoryItemId,
+          true
+        );
+      }
     } catch (error) {
       if (error instanceof Error) {
         setError(error.message);
       } else {
-        setError("Could not update quantity.");
+        setError(
+          "Could not update quantity."
+        );
       }
     }
   }
@@ -193,7 +548,8 @@ export default function DashboardPage() {
   ) {
     event.preventDefault();
 
-    const token = localStorage.getItem("access_token");
+    const token =
+      localStorage.getItem("access_token");
 
     if (!token) {
       router.push("/");
@@ -201,12 +557,16 @@ export default function DashboardPage() {
     }
 
     if (!household) {
-      setError("No household selected.");
+      setError(
+        "No household selected."
+      );
       return;
     }
 
     if (!selectedProductId) {
-      setError("Please select a product.");
+      setError(
+        "Please select a product."
+      );
       return;
     }
 
@@ -215,58 +575,259 @@ export default function DashboardPage() {
       setError("");
       setMessage("");
 
-      const response = await fetch(`${API_URL}/inventory`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          household_id: household.id,
-          product_id: Number(selectedProductId),
-          quantity: quantity,
-          expiration_date:
-            expirationDate === "" ? null : expirationDate,
-          low_stock_threshold: lowStockThreshold,
-        }),
-      });
+      const response = await fetch(
+        `${API_URL}/inventory`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            household_id: household.id,
+            product_id: Number(
+              selectedProductId
+            ),
+            quantity,
+            expiration_date:
+              expirationDate === ""
+                ? null
+                : expirationDate,
+            low_stock_threshold:
+              lowStockThreshold,
+          }),
+        }
+      );
 
       if (!response.ok) {
         const data = await response.json();
 
         throw new Error(
-          data.detail || "Could not add item."
+          data.detail ||
+            "Could not add item."
         );
       }
 
-      setMessage("Item added to pantry successfully.");
+      setMessage(
+        "Item added to pantry successfully."
+      );
 
       setQuantity(1);
       setExpirationDate("");
       setLowStockThreshold(1);
+      setBarcodeInput("");
+      setBarcodeResult("");
 
       await loadDashboard();
     } catch (error) {
       if (error instanceof Error) {
         setError(error.message);
       } else {
-        setError("Could not add item.");
+        setError(
+          "Could not add item."
+        );
       }
     } finally {
       setAddingItem(false);
     }
   }
 
+  async function removeItem(
+    inventoryItemId: number
+  ) {
+    const token =
+      localStorage.getItem("access_token");
+
+    if (!token) {
+      router.push("/");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Are you sure you want to remove this item from the pantry?"
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setRemovingItemId(
+        inventoryItemId
+      );
+
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/inventory/${inventoryItemId}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+
+        throw new Error(
+          data.detail ||
+            "Could not remove item."
+        );
+      }
+
+      setMessage(
+        "Item removed from pantry successfully."
+      );
+
+      if (
+        openHistoryItemId ===
+        inventoryItemId
+      ) {
+        setOpenHistoryItemId(null);
+      }
+
+      setHistoryByItem((previous) => {
+        const updated = {
+          ...previous,
+        };
+
+        delete updated[inventoryItemId];
+
+        return updated;
+      });
+
+      await loadDashboard();
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError(
+          "Could not remove item."
+        );
+      }
+    } finally {
+      setRemovingItemId(null);
+    }
+  }
+
+  async function loadHistory(
+    inventoryItemId: number,
+    forceRefresh = false
+  ) {
+    if (
+      openHistoryItemId ===
+        inventoryItemId &&
+      !forceRefresh
+    ) {
+      setOpenHistoryItemId(null);
+      return;
+    }
+
+    const token =
+      localStorage.getItem("access_token");
+
+    if (!token) {
+      router.push("/");
+      return;
+    }
+
+    if (
+      historyByItem[
+        inventoryItemId
+      ] &&
+      !forceRefresh
+    ) {
+      setOpenHistoryItemId(
+        inventoryItemId
+      );
+
+      return;
+    }
+
+    try {
+      setLoadingHistoryId(
+        inventoryItemId
+      );
+
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/inventory/${inventoryItemId}/history`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+
+        throw new Error(
+          data.detail ||
+            "Could not load inventory history."
+        );
+      }
+
+      const historyData =
+        await response.json();
+
+      setHistoryByItem(
+        (previous) => ({
+          ...previous,
+          [inventoryItemId]:
+            historyData,
+        })
+      );
+
+      setOpenHistoryItemId(
+        inventoryItemId
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError(
+          "Could not load inventory history."
+        );
+      }
+    } finally {
+      setLoadingHistoryId(null);
+    }
+  }
+
+  function formatHistoryDate(
+    dateValue: string
+  ) {
+    return new Date(
+      dateValue
+    ).toLocaleString();
+  }
+
   function handleLogout() {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("user_name");
+    BrowserCodeReader.releaseAllStreams();
+
+    localStorage.removeItem(
+      "access_token"
+    );
+
+    localStorage.removeItem(
+      "user_name"
+    );
+
     router.push("/");
   }
 
   if (loading) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
-        <p>Loading pantry...</p>
+      <main className="min-h-screen flex items-center justify-center bg-gray-100">
+        <p className="text-gray-700">
+          Loading pantry...
+        </p>
       </main>
     );
   }
@@ -280,13 +841,15 @@ export default function DashboardPage() {
           </h1>
 
           <p className="text-green-100 text-sm">
-            {user ? `Welcome, ${user.name}` : ""}
+            {user
+              ? `Welcome, ${user.name}`
+              : ""}
           </p>
         </div>
 
         <button
           onClick={handleLogout}
-          className="bg-white text-green-700 px-4 py-2 rounded-lg font-medium"
+          className="bg-white text-green-700 px-4 py-2 rounded-lg font-medium hover:bg-gray-100"
         >
           Logout
         </button>
@@ -317,6 +880,103 @@ export default function DashboardPage() {
           </>
         )}
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          <div className="bg-white rounded-xl shadow p-6">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">
+              Low Stock
+            </h3>
+
+            {lowStockItems.length === 0 ? (
+              <p className="text-gray-500">
+                No low-stock items.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {lowStockItems.map(
+                  (item) => (
+                    <div
+                      key={item.id}
+                      className="border border-gray-200 rounded-lg p-3"
+                    >
+                      <p className="font-medium text-gray-900">
+                        {
+                          item.product_name
+                        }
+                      </p>
+
+                      {item.brand && (
+                        <p className="text-sm text-gray-500">
+                          {item.brand}
+                        </p>
+                      )}
+
+                      <p className="text-sm text-gray-700 mt-1">
+                        Quantity:{" "}
+                        {item.quantity}
+                      </p>
+
+                      <p className="text-sm text-gray-500">
+                        Low stock threshold:{" "}
+                        {
+                          item.low_stock_threshold
+                        }
+                      </p>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl shadow p-6">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">
+              Expiring Soon
+            </h3>
+
+            {expiringItems.length === 0 ? (
+              <p className="text-gray-500">
+                No items expiring in the
+                next 14 days.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {expiringItems.map(
+                  (item) => (
+                    <div
+                      key={item.id}
+                      className="border border-gray-200 rounded-lg p-3"
+                    >
+                      <p className="font-medium text-gray-900">
+                        {
+                          item.product_name
+                        }
+                      </p>
+
+                      {item.brand && (
+                        <p className="text-sm text-gray-500">
+                          {item.brand}
+                        </p>
+                      )}
+
+                      <p className="text-sm text-gray-700 mt-1">
+                        Quantity:{" "}
+                        {item.quantity}
+                      </p>
+
+                      <p className="text-sm text-gray-500">
+                        Expires:{" "}
+                        {
+                          item.expiration_date
+                        }
+                      </p>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="bg-white rounded-xl shadow p-6 mb-8">
           <h3 className="text-xl font-semibold text-gray-900 mb-5">
             Add Item
@@ -326,36 +986,132 @@ export default function DashboardPage() {
             onSubmit={handleAddItem}
             className="grid grid-cols-1 md:grid-cols-2 gap-4"
           >
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Barcode-Assisted Entry
+              </label>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={barcodeInput}
+                  onChange={(event) =>
+                    setBarcodeInput(
+                      event.target.value
+                    )
+                  }
+                  placeholder="Enter product barcode"
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+                />
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    lookupBarcode()
+                  }
+                  disabled={
+                    lookingUpBarcode ||
+                    scanning
+                  }
+                  className="bg-blue-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {lookingUpBarcode
+                    ? "Looking Up..."
+                    : "Look Up Barcode"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={scanBarcode}
+                  disabled={
+                    scanning ||
+                    lookingUpBarcode
+                  }
+                  className="bg-purple-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {scanning
+                    ? "Scanning..."
+                    : "Scan Barcode"}
+                </button>
+              </div>
+
+              {barcodeResult && (
+                <p className="text-sm text-green-700 mt-2 font-medium">
+                  {barcodeResult}
+                </p>
+              )}
+
+              <div
+                className={
+                  scannerOpen
+                    ? "mt-4"
+                    : "hidden"
+                }
+              >
+                <div className="max-w-lg border border-gray-300 rounded-xl overflow-hidden bg-black">
+                  <video
+                    ref={videoRef}
+                    className="w-full aspect-video object-cover"
+                    muted
+                    playsInline
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 mt-3">
+                  <p className="text-sm text-gray-600">
+                    Point the camera at
+                    the product barcode.
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={stopScanner}
+                    className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-300"
+                  >
+                    Cancel Scan
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Product
               </label>
 
               <select
-                value={selectedProductId}
+                value={
+                  selectedProductId
+                }
                 onChange={(event) =>
-                  setSelectedProductId(event.target.value)
+                  setSelectedProductId(
+                    event.target.value
+                  )
                 }
                 required
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
               >
-                {products.length === 0 && (
+                {products.length ===
+                  0 && (
                   <option value="">
                     No products available
                   </option>
                 )}
 
-                {products.map((product) => (
-                  <option
-                    key={product.id}
-                    value={product.id}
-                  >
-                    {product.name}
-                    {product.brand
-                      ? ` - ${product.brand}`
-                      : ""}
-                  </option>
-                ))}
+                {products.map(
+                  (product) => (
+                    <option
+                      key={product.id}
+                      value={product.id}
+                    >
+                      {product.name}
+                      {product.brand
+                        ? ` - ${product.brand}`
+                        : ""}
+                    </option>
+                  )
+                )}
               </select>
             </div>
 
@@ -369,7 +1125,11 @@ export default function DashboardPage() {
                 min="0"
                 value={quantity}
                 onChange={(event) =>
-                  setQuantity(Number(event.target.value))
+                  setQuantity(
+                    Number(
+                      event.target.value
+                    )
+                  )
                 }
                 required
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
@@ -385,7 +1145,9 @@ export default function DashboardPage() {
                 type="date"
                 value={expirationDate}
                 onChange={(event) =>
-                  setExpirationDate(event.target.value)
+                  setExpirationDate(
+                    event.target.value
+                  )
                 }
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
               />
@@ -399,10 +1161,14 @@ export default function DashboardPage() {
               <input
                 type="number"
                 min="0"
-                value={lowStockThreshold}
+                value={
+                  lowStockThreshold
+                }
                 onChange={(event) =>
                   setLowStockThreshold(
-                    Number(event.target.value)
+                    Number(
+                      event.target.value
+                    )
                   )
                 }
                 required
@@ -434,62 +1200,194 @@ export default function DashboardPage() {
 
           {inventory.length === 0 ? (
             <p className="text-gray-500">
-              Your pantry is currently empty.
+              Your pantry is currently
+              empty.
             </p>
           ) : (
             <div className="space-y-4">
-              {inventory.map((item) => (
-                <div
-                  key={item.id}
-                  className="border border-gray-200 rounded-lg p-4"
-                >
-                  <h4 className="font-semibold text-gray-900">
-                    {item.product_name}
-                  </h4>
+              {inventory.map(
+                (item) => (
+                  <div
+                    key={item.id}
+                    className="border border-gray-200 rounded-lg p-4"
+                  >
+                    <h4 className="font-semibold text-gray-900">
+                      {
+                        item.product_name
+                      }
+                    </h4>
 
-                  {item.brand && (
-                    <p className="text-sm text-gray-500">
-                      {item.brand}
+                    {item.brand && (
+                      <p className="text-sm text-gray-500">
+                        {item.brand}
+                      </p>
+                    )}
+
+                    {item.barcode && (
+                      <p className="text-xs text-gray-400">
+                        Barcode:{" "}
+                        {item.barcode}
+                      </p>
+                    )}
+
+                    <p className="text-sm text-gray-700 mt-2">
+                      Quantity:{" "}
+                      {item.quantity}
                     </p>
-                  )}
 
-                  <p className="text-sm text-gray-700 mt-2">
-                    Quantity: {item.quantity}
-                  </p>
+                    {item.expiration_date && (
+                      <p className="text-sm text-gray-700 mt-1">
+                        Expires:{" "}
+                        {
+                          item.expiration_date
+                        }
+                      </p>
+                    )}
 
-                  <div className="flex gap-3 mt-4">
-                    <button
-                      onClick={() =>
-                        changeQuantity(item.id, -1)
+                    <p className="text-sm text-gray-500 mt-1">
+                      Low stock at:{" "}
+                      {
+                        item.low_stock_threshold
                       }
-                      disabled={item.quantity === 0}
-                      className="bg-red-100 text-red-700 px-4 py-2 rounded-lg font-medium hover:bg-red-200 disabled:opacity-50"
-                    >
-                      - Consume
-                    </button>
+                    </p>
 
-                    <button
-                      onClick={() =>
-                        changeQuantity(item.id, 1)
-                      }
-                      className="bg-green-100 text-green-700 px-4 py-2 rounded-lg font-medium hover:bg-green-200"
-                    >
-                      + Restock
-                    </button>
+                    <div className="flex flex-wrap gap-3 mt-4">
+                      <button
+                        onClick={() =>
+                          changeQuantity(
+                            item.id,
+                            -1
+                          )
+                        }
+                        disabled={
+                          item.quantity ===
+                          0
+                        }
+                        className="bg-red-100 text-red-700 px-4 py-2 rounded-lg font-medium hover:bg-red-200 disabled:opacity-50"
+                      >
+                        - Consume
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          changeQuantity(
+                            item.id,
+                            1
+                          )
+                        }
+                        className="bg-green-100 text-green-700 px-4 py-2 rounded-lg font-medium hover:bg-green-200"
+                      >
+                        + Restock
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          loadHistory(
+                            item.id
+                          )
+                        }
+                        className="bg-blue-100 text-blue-700 px-4 py-2 rounded-lg font-medium hover:bg-blue-200"
+                      >
+                        {loadingHistoryId ===
+                        item.id
+                          ? "Loading..."
+                          : openHistoryItemId ===
+                            item.id
+                          ? "Hide History"
+                          : "View History"}
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          removeItem(
+                            item.id
+                          )
+                        }
+                        disabled={
+                          removingItemId ===
+                          item.id
+                        }
+                        className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-medium hover:bg-gray-300 disabled:opacity-50"
+                      >
+                        {removingItemId ===
+                        item.id
+                          ? "Removing..."
+                          : "Remove Item"}
+                      </button>
+                    </div>
+
+                    {openHistoryItemId ===
+                      item.id && (
+                      <div className="mt-5 bg-gray-50 border border-gray-200 rounded-lg p-4">
+                        <h5 className="font-semibold text-gray-900 mb-3">
+                          Inventory History
+                        </h5>
+
+                        {!historyByItem[
+                          item.id
+                        ] ||
+                        historyByItem[
+                          item.id
+                        ].length ===
+                          0 ? (
+                          <p className="text-sm text-gray-500">
+                            No history
+                            found for this
+                            item.
+                          </p>
+                        ) : (
+                          <div className="space-y-3">
+                            {historyByItem[
+                              item.id
+                            ].map(
+                              (
+                                history
+                              ) => (
+                                <div
+                                  key={
+                                    history.id
+                                  }
+                                  className="bg-white border border-gray-200 rounded-lg p-3"
+                                >
+                                  <div className="flex flex-wrap justify-between gap-2">
+                                    <p className="font-medium text-gray-900">
+                                      {
+                                        history.action
+                                      }
+                                    </p>
+
+                                    <p className="text-xs text-gray-500">
+                                      {formatHistoryDate(
+                                        history.created_at
+                                      )}
+                                    </p>
+                                  </div>
+
+                                  <p className="text-sm text-gray-600 mt-1">
+                                    By:{" "}
+                                    {
+                                      history.user_name
+                                    }
+                                  </p>
+
+                                  <p className="text-sm text-gray-600">
+                                    Quantity:{" "}
+                                    {history.old_quantity ??
+                                      "-"}{" "}
+                                    →{" "}
+                                    {history.new_quantity ??
+                                      "-"}
+                                  </p>
+                                </div>
+                              )
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-
-                  {item.expiration_date && (
-                    <p className="text-sm text-gray-700 mt-3">
-                      Expires: {item.expiration_date}
-                    </p>
-                  )}
-
-                  <p className="text-sm text-gray-500 mt-1">
-                    Low stock at:{" "}
-                    {item.low_stock_threshold}
-                  </p>
-                </div>
-              ))}
+                )
+              )}
             </div>
           )}
         </div>
