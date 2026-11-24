@@ -36,6 +36,17 @@ type InventoryItem = {
   low_stock_threshold: number;
 };
 
+type HistoryEntry = {
+  id: number;
+  inventory_item_id: number;
+  user_id: number;
+  user_name: string;
+  action: string;
+  old_quantity: number | null;
+  new_quantity: number | null;
+  created_at: string;
+};
+
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -48,6 +59,13 @@ export default function DashboardPage() {
   const [lowStockItems, setLowStockItems] = useState<InventoryItem[]>([]);
   const [expiringItems, setExpiringItems] = useState<InventoryItem[]>([]);
 
+  const [historyByItem, setHistoryByItem] = useState<
+    Record<number, HistoryEntry[]>
+  >({});
+  const [openHistoryItemId, setOpenHistoryItemId] = useState<number | null>(
+    null
+  );
+
   const [selectedProductId, setSelectedProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
   const [expirationDate, setExpirationDate] = useState("");
@@ -55,6 +73,8 @@ export default function DashboardPage() {
 
   const [loading, setLoading] = useState(true);
   const [addingItem, setAddingItem] = useState(false);
+  const [removingItemId, setRemovingItemId] = useState<number | null>(null);
+  const [loadingHistoryId, setLoadingHistoryId] = useState<number | null>(null);
 
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -93,7 +113,7 @@ export default function DashboardPage() {
       const userData = await userResponse.json();
       setUser(userData);
 
-      // Load user's households
+      // Load households
       const householdResponse = await fetch(`${API_URL}/households`, {
         headers: authHeaders,
       });
@@ -110,10 +130,9 @@ export default function DashboardPage() {
       }
 
       const firstHousehold = households[0];
-
       setHousehold(firstHousehold);
 
-      // Load household inventory
+      // Load inventory
       const inventoryResponse = await fetch(
         `${API_URL}/inventory/${firstHousehold.id}`,
         {
@@ -158,7 +177,7 @@ export default function DashboardPage() {
       const expiringData = await expiringResponse.json();
       setExpiringItems(expiringData);
 
-      // Load available products
+      // Load products
       const productsResponse = await fetch(`${API_URL}/products`);
 
       if (!productsResponse.ok) {
@@ -219,7 +238,17 @@ export default function DashboardPage() {
         );
       }
 
+      setMessage(
+        change < 0
+          ? "Item consumed successfully."
+          : "Item restocked successfully."
+      );
+
       await loadDashboard();
+
+      if (openHistoryItemId === inventoryItemId) {
+        await loadHistory(inventoryItemId, true);
+      }
     } catch (error) {
       if (error instanceof Error) {
         setError(error.message);
@@ -298,6 +327,140 @@ export default function DashboardPage() {
     }
   }
 
+  async function removeItem(inventoryItemId: number) {
+    const token = localStorage.getItem("access_token");
+
+    if (!token) {
+      router.push("/");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Are you sure you want to remove this item from the pantry?"
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setRemovingItemId(inventoryItemId);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/inventory/${inventoryItemId}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+
+        throw new Error(
+          data.detail || "Could not remove item."
+        );
+      }
+
+      setMessage("Item removed from pantry successfully.");
+
+      if (openHistoryItemId === inventoryItemId) {
+        setOpenHistoryItemId(null);
+      }
+
+      setHistoryByItem((previous) => {
+        const updated = { ...previous };
+        delete updated[inventoryItemId];
+        return updated;
+      });
+
+      await loadDashboard();
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError("Could not remove item.");
+      }
+    } finally {
+      setRemovingItemId(null);
+    }
+  }
+
+  async function loadHistory(
+    inventoryItemId: number,
+    forceRefresh = false
+  ) {
+    if (
+      openHistoryItemId === inventoryItemId &&
+      !forceRefresh
+    ) {
+      setOpenHistoryItemId(null);
+      return;
+    }
+
+    const token = localStorage.getItem("access_token");
+
+    if (!token) {
+      router.push("/");
+      return;
+    }
+
+    if (
+      historyByItem[inventoryItemId] &&
+      !forceRefresh
+    ) {
+      setOpenHistoryItemId(inventoryItemId);
+      return;
+    }
+
+    try {
+      setLoadingHistoryId(inventoryItemId);
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/inventory/${inventoryItemId}/history`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+
+        throw new Error(
+          data.detail || "Could not load inventory history."
+        );
+      }
+
+      const historyData = await response.json();
+
+      setHistoryByItem((previous) => ({
+        ...previous,
+        [inventoryItemId]: historyData,
+      }));
+
+      setOpenHistoryItemId(inventoryItemId);
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError("Could not load inventory history.");
+      }
+    } finally {
+      setLoadingHistoryId(null);
+    }
+  }
+
+  function formatHistoryDate(dateValue: string) {
+    return new Date(dateValue).toLocaleString();
+  }
+
   function handleLogout() {
     localStorage.removeItem("access_token");
     localStorage.removeItem("user_name");
@@ -337,21 +500,21 @@ export default function DashboardPage() {
       </header>
 
       <div className="max-w-6xl mx-auto p-8">
-        {/* Error message */}
+        {/* Error */}
         {error && (
           <div className="bg-red-100 text-red-700 p-4 rounded-lg mb-6">
             {error}
           </div>
         )}
 
-        {/* Success message */}
+        {/* Success */}
         {message && (
           <div className="bg-green-100 text-green-700 p-4 rounded-lg mb-6">
             {message}
           </div>
         )}
 
-        {/* Household information */}
+        {/* Household */}
         {household && (
           <>
             <h2 className="text-2xl font-semibold text-gray-900">
@@ -364,7 +527,7 @@ export default function DashboardPage() {
           </>
         )}
 
-        {/* Low Stock and Expiring Soon */}
+        {/* Low Stock + Expiring Soon */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
           {/* Low Stock */}
           <div className="bg-white rounded-xl shadow p-6">
@@ -546,7 +709,6 @@ export default function DashboardPage() {
               />
             </div>
 
-            {/* Submit */}
             <div className="md:col-span-2">
               <button
                 type="submit"
@@ -595,6 +757,18 @@ export default function DashboardPage() {
                     Quantity: {item.quantity}
                   </p>
 
+                  {item.expiration_date && (
+                    <p className="text-sm text-gray-700 mt-1">
+                      Expires: {item.expiration_date}
+                    </p>
+                  )}
+
+                  <p className="text-sm text-gray-500 mt-1">
+                    Low stock at:{" "}
+                    {item.low_stock_threshold}
+                  </p>
+
+                  {/* Inventory Actions */}
                   <div className="flex flex-wrap gap-3 mt-4">
                     <button
                       onClick={() =>
@@ -614,18 +788,77 @@ export default function DashboardPage() {
                     >
                       + Restock
                     </button>
+
+                    <button
+                      onClick={() => loadHistory(item.id)}
+                      className="bg-blue-100 text-blue-700 px-4 py-2 rounded-lg font-medium hover:bg-blue-200"
+                    >
+                      {loadingHistoryId === item.id
+                        ? "Loading..."
+                        : openHistoryItemId === item.id
+                        ? "Hide History"
+                        : "View History"}
+                    </button>
+
+                    <button
+                      onClick={() => removeItem(item.id)}
+                      disabled={removingItemId === item.id}
+                      className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-medium hover:bg-gray-300 disabled:opacity-50"
+                    >
+                      {removingItemId === item.id
+                        ? "Removing..."
+                        : "Remove Item"}
+                    </button>
                   </div>
 
-                  {item.expiration_date && (
-                    <p className="text-sm text-gray-700 mt-3">
-                      Expires: {item.expiration_date}
-                    </p>
-                  )}
+                  {/* Inventory History */}
+                  {openHistoryItemId === item.id && (
+                    <div className="mt-5 bg-gray-50 border border-gray-200 rounded-lg p-4">
+                      <h5 className="font-semibold text-gray-900 mb-3">
+                        Inventory History
+                      </h5>
 
-                  <p className="text-sm text-gray-500 mt-1">
-                    Low stock at:{" "}
-                    {item.low_stock_threshold}
-                  </p>
+                      {!historyByItem[item.id] ||
+                      historyByItem[item.id].length === 0 ? (
+                        <p className="text-sm text-gray-500">
+                          No history found for this item.
+                        </p>
+                      ) : (
+                        <div className="space-y-3">
+                          {historyByItem[item.id].map(
+                            (history) => (
+                              <div
+                                key={history.id}
+                                className="bg-white border border-gray-200 rounded-lg p-3"
+                              >
+                                <div className="flex flex-wrap justify-between gap-2">
+                                  <p className="font-medium text-gray-900">
+                                    {history.action}
+                                  </p>
+
+                                  <p className="text-xs text-gray-500">
+                                    {formatHistoryDate(
+                                      history.created_at
+                                    )}
+                                  </p>
+                                </div>
+
+                                <p className="text-sm text-gray-600 mt-1">
+                                  By: {history.user_name}
+                                </p>
+
+                                <p className="text-sm text-gray-600">
+                                  Quantity:{" "}
+                                  {history.old_quantity ?? "-"} →{" "}
+                                  {history.new_quantity ?? "-"}
+                                </p>
+                              </div>
+                            )
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
